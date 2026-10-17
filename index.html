@@ -379,20 +379,24 @@ async function verLista(l){
   if(!it){body.appendChild(el('div','vacio','No se pudo abrir esta playlist. Prueba con Buscar.'));return}
   it.forEach(function(x){if(x&&x.track&&x.track.id&&x.track.type==='track')body.appendChild(fila(aCancion(x.track)))});
 }
+var EXT={mp3:'audio/mpeg',m4a:'audio/mp4',mp4:'audio/mp4',aac:'audio/aac',wav:'audio/wav',caf:'audio/x-caf',ogg:'audio/ogg',flac:'audio/flac'};
+function tipoAudio(f){var m=/\.([a-z0-9]+)$/i.exec(f.name||'');var e=m?m[1].toLowerCase():'';if(EXT[e])return EXT[e];return (f.type&&f.type.indexOf('audio')===0)?f.type:null}
 function verCel(){
   body.appendChild(el('div','vacio','Elige un audio guardado en este celular. Se guarda solo en este dispositivo.'));
-  var f=el('input');f.type='file';f.accept='audio/*';f.multiple=true;f.style.display='none';
+  var f=el('input');f.type='file';f.multiple=true;f.style.display='none';
   var b=el('button','stop','📱 Elegir audio');
   b.style.background='var(--green)';b.style.color='#000';
   var msg=el('div','vacio','');
   b.addEventListener('click',function(){f.click()});
   f.addEventListener('change',async function(){
-    var fs=Array.prototype.slice.call(f.files);if(!fs.length)return;
+    var todos=Array.prototype.slice.call(f.files);if(!todos.length)return;
+    var fs=todos.filter(function(x){return tipoAudio(x)});
+    if(!fs.length){msg.textContent='Ese archivo no parece un audio (mp3, m4a o wav). Prueba con otro.';f.value='';return}
     msg.textContent='Guardando…';
     try{
       for(var i=0;i<fs.length;i++){
         var id='local:'+Date.now()+'-'+Math.random().toString(36).slice(2,8);
-        await dbPut(id,fs[i]);
+        await dbPut(id,new Blob([fs[i]],{type:tipoAudio(fs[i])}));
         (canciones[actual]=canciones[actual]||[]).push({id:id,t:fs[i].name.replace(/\.[^.]+$/,''),a:'Audio del celular',local:true});
       }
       guardar();marcar();pintarFilas();vista('vEdit');
