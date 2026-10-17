@@ -88,7 +88,7 @@ button:focus-visible,input:focus-visible{outline:3px solid #fff;outline-offset:2
     <li>Para cargar canciones, toca <b>⚙️ Editar canciones</b>, luego <b>+ Agregar</b> en el momento que quieras.</li>
     <li>Puedes <b>buscar por nombre</b> o elegir una canción de <b>Mis playlists</b>.</li>
     <li>Si un momento tiene varias canciones, suenan <b>en orden</b>. Con ▲ ▼ cambias el orden y con ✕ quitas una.</li>
-    <li>Antes de la misa, <b>prueba cada botón</b> y deja abierta la app de Spotify en este dispositivo.</li>
+    <li>Antes de la misa, <b>prueba cada botón</b>, sube el volumen y deja esta pantalla abierta mientras suena la música.</li>
   </ol>
   <button class="stop" id="ayudaOk" style="background:var(--green);color:#000">Entendido</button>
 </div>
@@ -110,7 +110,7 @@ var CLIENT_ID='acd74b3fc40f48c2b66cab82325ce825';
 var REDIRECT_URI=location.origin+location.pathname;
 /* =================================================== */
 
-var SCOPES='user-modify-playback-state user-read-playback-state playlist-read-private playlist-read-collaborative';
+var SCOPES='streaming user-read-email user-read-private user-modify-playback-state user-read-playback-state playlist-read-private playlist-read-collaborative';
 var momentos=[['Entrada','🎶'],['Piedad','🙏'],['Gloria','✨'],['Salmo','📖'],['Aleluya','🕊️'],['Ofertorio','🍞'],['Santo','🔔'],['Paz','🤝'],['Cordero','🐑'],['Comunión','✝️'],['Acción de gracias','💛'],['Salida','🚪']];
 function $(id){return document.getElementById(id)}
 function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e}
@@ -131,6 +131,7 @@ async function pedirToken(params){
     var r=await fetch('https://accounts.spotify.com/api/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(params)});
     var d=await r.json();
     if(!r.ok||!d.access_token)return false;
+    if(params.grant_type==='authorization_code')ls('sp_v','2');
     ls('sp_access',d.access_token);ls('sp_exp',String(Date.now()+d.expires_in*1000));
     if(d.refresh_token)ls('sp_refresh',d.refresh_token);
     return true;
@@ -142,7 +143,7 @@ async function token(){
   if(rt&&await pedirToken({grant_type:'refresh_token',refresh_token:rt}))return ls('sp_access');
   return null;
 }
-function cerrarSesion(){['sp_access','sp_refresh','sp_exp','sp_verifier'].forEach(function(k){ls(k,null)});detenerLocal();vista('vLogin')}
+function cerrarSesion(){['sp_access','sp_refresh','sp_exp','sp_verifier','sp_v'].forEach(function(k){ls(k,null)});detenerLocal();vista('vLogin')}
 async function api(m,p,b){
   var t=await token();
   if(!t){cerrarSesion();return{status:401,data:null}}
@@ -166,14 +167,37 @@ momentos.forEach(function(m){
 function marcar(){momentos.forEach(function(m){var q=canciones[m[0]]||[];botones[m[0]].classList.toggle('sin',!q.length);botones[m[0]].textContent=m[1]+' '+m[0]+(q.length>1?' · '+q.length:'')})}
 marcar();
 
+/* ---------- Reproductor dentro de esta página (el celular suena solo) ---------- */
+var player=null,deviceId=null;
+window.onSpotifyWebPlaybackSDKReady=function(){if(ls('sp_access'))iniciarPlayer()};
+function cargarSDK(){
+  if($('sdk'))return;
+  var s=document.createElement('script');s.id='sdk';s.src='https://sdk.scdn.co/spotify-player.js';document.head.appendChild(s);
+}
+function iniciarPlayer(){
+  if(player||!window.Spotify)return;
+  player=new Spotify.Player({name:'Botonera litúrgica',getOAuthToken:function(cb){token().then(function(t){cb(t)})},volume:1});
+  player.addListener('ready',function(e){deviceId=e.device_id});
+  player.addListener('not_ready',function(){deviceId=null});
+  player.addListener('account_error',function(){status.textContent='Esta cuenta necesita Spotify Premium.'});
+  player.addListener('authentication_error',function(){status.textContent='Hay que volver a conectar con Spotify.'});
+  player.addListener('initialization_error',function(){status.textContent='Este navegador no puede reproducir música aquí.'});
+  player.connect();
+}
+
 /* ---------- Reproducción ---------- */
 function detenerLocal(){clearInterval(poll);poll=null;prog.style.width='0';if(activo)activo.classList.remove('playing');activo=null;cola=[]}
 function fin(txt){detenerLocal();status.textContent=txt}
 async function sonar(uris){
-  var r=await api('PUT','/me/player/play',{uris:uris});
-  if(r.status===404){
+  var q=deviceId?'?device_id='+deviceId:'';
+  var r=await api('PUT','/me/player/play'+q,{uris:uris});
+  if(r.status===404&&deviceId){
+    await api('PUT','/me/player',{device_ids:[deviceId],play:false});
+    await new Promise(function(ok){setTimeout(ok,700)});
+    r=await api('PUT','/me/player/play'+q,{uris:uris});
+  }else if(r.status===404){
     var d=await api('GET','/me/player/devices'),l=(d.data&&d.data.devices)||[];
-    if(!l.length){status.textContent='Abre la app de Spotify en este dispositivo y vuelve a intentar.';return false}
+    if(!l.length){status.textContent='Espera unos segundos y vuelve a intentar.';return false}
     await api('PUT','/me/player',{device_ids:[l[0].id],play:false});
     await new Promise(function(ok){setTimeout(ok,700)});
     r=await api('PUT','/me/player/play',{uris:uris});
@@ -184,6 +208,8 @@ async function sonar(uris){
   return true;
 }
 async function reproducir(n,btn){
+  if(player&&player.activateElement)player.activateElement();
+  try{if(navigator.wakeLock)navigator.wakeLock.request('screen').catch(function(){})}catch(e){}
   detenerLocal();
   var q=canciones[n]||[];
   if(!q.length){status.textContent='Falta la canción de '+n+'. Toca Editar canciones.';return}
@@ -301,7 +327,7 @@ $('pickBack').addEventListener('click',function(){vista('vEdit')});
 /* ---------- Ayuda ---------- */
 $('ayuda').addEventListener('click',function(){detenerLocal();vista('vHelp')});
 $('ayudaOk').addEventListener('click',function(){ls('ayudaVista','1');vista('vApp')});
-function entrar(){vista(ls('ayudaVista')==='1'?'vApp':'vHelp')}
+function entrar(){cargarSDK();if(window.Spotify)iniciarPlayer();vista(ls('ayudaVista')==='1'?'vApp':'vHelp')}
 
 /* ---------- Inicio ---------- */
 $('loginBtn').addEventListener('click',function(){
@@ -317,7 +343,10 @@ $('loginBtn').addEventListener('click',function(){
     $('avisoLogin').textContent='No se pudo iniciar sesión. Revisa el Client ID y la Redirect URI.';
     return;
   }
-  if(await token())entrar();
+  if(await token()){
+    if(ls('sp_v')!=='2'){cerrarSesion();$('avisoLogin').textContent='Hay que volver a conectar con Spotify para activar el sonido en este dispositivo.';return}
+    entrar();
+  }
 })();
 </script>
 </body>
