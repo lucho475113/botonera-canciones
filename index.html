@@ -29,7 +29,7 @@ h1{font-size:1.6rem;text-align:center;color:var(--green);margin-bottom:12px}
 .mini.q{color:var(--muted)}
 .back{background:transparent;border:none;color:var(--muted);font-size:1rem;font-weight:600;cursor:pointer;align-self:flex-start;padding:6px 0;margin-bottom:8px}
 .tabs{display:flex;gap:8px;width:100%;margin-bottom:12px}
-.tab{flex:1;padding:12px;border-radius:10px;border:2px solid var(--line);background:transparent;color:var(--muted);font-weight:700;font-size:1rem;cursor:pointer}
+.tab{flex:1;padding:12px 4px;border-radius:10px;border:2px solid var(--line);background:transparent;color:var(--muted);font-weight:700;font-size:.9rem;cursor:pointer}
 .tab.on{background:var(--green);border-color:var(--green);color:#000}
 .search{width:100%;padding:14px;border-radius:10px;border:2px solid var(--line);background:var(--card);color:var(--text);font-size:1rem;margin-bottom:10px;user-select:text}
 .song{display:block;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px;color:var(--text);cursor:pointer}
@@ -86,7 +86,7 @@ button:focus-visible,input:focus-visible{outline:3px solid #fff;outline-offset:2
     <li>Si un botón se ve <b>apagado y con borde punteado</b>, todavía no tiene canciones.</li>
     <li><b>Detener</b> corta lo que está sonando.</li>
     <li>Para cargar canciones, toca <b>⚙️ Editar canciones</b>, luego <b>+ Agregar</b> en el momento que quieras.</li>
-    <li>Puedes <b>buscar por nombre</b> o elegir una canción de <b>Mis playlists</b>.</li>
+    <li>Puedes <b>buscar por nombre</b> o elegir una canción de <b>Mis playlists</b>. También puedes usar un <b>audio de tu celular</b>.</li>
     <li>Si un momento tiene varias canciones, suenan <b>en orden</b>. Con ▲ ▼ cambias el orden y con ✕ quitas una.</li>
     <li>Antes de la misa, <b>prueba cada botón</b>, sube el volumen y deja esta pantalla abierta mientras suena la música.</li>
   </ol>
@@ -99,6 +99,7 @@ button:focus-visible,input:focus-visible{outline:3px solid #fff;outline-offset:2
   <div class="tabs" style="margin-top:8px">
     <button class="tab on" id="tBuscar">Buscar</button>
     <button class="tab" id="tListas">Mis playlists</button>
+    <button class="tab" id="tCel">Mi celular</button>
   </div>
   <div class="list" id="pickBody"></div>
 </div>
@@ -167,6 +168,12 @@ momentos.forEach(function(m){
 function marcar(){momentos.forEach(function(m){var q=canciones[m[0]]||[];botones[m[0]].classList.toggle('sin',!q.length);botones[m[0]].textContent=m[1]+' '+m[0]+(q.length>1?' · '+q.length:'')})}
 marcar();
 
+/* ---------- Audios del celular (guardados en este dispositivo) ---------- */
+function abrirDB(){return new Promise(function(ok,err){var r=indexedDB.open('botonera',1);r.onupgradeneeded=function(){r.result.createObjectStore('audios')};r.onsuccess=function(){ok(r.result)};r.onerror=function(){err(r.error)}})}
+function dbPut(k,v){return abrirDB().then(function(d){return new Promise(function(ok,err){var t=d.transaction('audios','readwrite');t.objectStore('audios').put(v,k);t.oncomplete=ok;t.onerror=function(){err(t.error)}})})}
+function dbGet(k){return abrirDB().then(function(d){return new Promise(function(ok,err){var r=d.transaction('audios').objectStore('audios').get(k);r.onsuccess=function(){ok(r.result)};r.onerror=function(){err(r.error)}})})}
+function dbDel(k){return abrirDB().then(function(d){return new Promise(function(ok,err){var t=d.transaction('audios','readwrite');t.objectStore('audios').delete(k);t.oncomplete=ok;t.onerror=function(){err(t.error)}})})}
+
 /* ---------- Reproductor dentro de esta página (el celular suena solo) ---------- */
 var player=null,deviceId=null;
 window.onSpotifyWebPlaybackSDKReady=function(){if(ls('sp_access'))iniciarPlayer()};
@@ -186,8 +193,17 @@ function iniciarPlayer(){
 }
 
 /* ---------- Reproducción ---------- */
-function detenerLocal(){clearInterval(poll);poll=null;prog.style.width='0';if(activo)activo.classList.remove('playing');activo=null;cola=[]}
+var misa=null,gen=0,audio=new Audio(),urlAct=null;
+var SILENCIO='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+function detenerLocal(){
+  gen++;clearInterval(poll);poll=null;misa=null;
+  audio.onended=null;audio.ontimeupdate=null;try{audio.pause()}catch(e){}
+  prog.style.width='0';
+  if(activo)activo.classList.remove('playing');
+  activo=null;cola=[];
+}
 function fin(txt){detenerLocal();status.textContent=txt}
+function desbloquearAudio(){try{audio.src=SILENCIO;var p=audio.play();if(p&&p.catch)p.catch(function(){})}catch(e){}}
 async function sonar(uris){
   var q=deviceId?'?device_id='+deviceId:'';
   var r=await api('PUT','/me/player/play'+q,{uris:uris});
@@ -207,31 +223,73 @@ async function sonar(uris){
   if(r.status>=300){status.textContent='Spotify no pudo reproducir (error '+r.status+').';return false}
   return true;
 }
-async function reproducir(n,btn){
+function armarSegmentos(q){
+  var s=[];
+  q.forEach(function(c){
+    var u=s[s.length-1];
+    if(c.local)s.push({loc:true,items:[c]});
+    else if(u&&!u.loc)u.items.push(c);
+    else s.push({loc:false,items:[c]});
+  });
+  return s;
+}
+function reproducir(n,btn){
   if(player&&player.activateElement)player.activateElement();
   try{if(navigator.wakeLock)navigator.wakeLock.request('screen').catch(function(){})}catch(e){}
   detenerLocal();
   var q=canciones[n]||[];
   if(!q.length){status.textContent='Falta la canción de '+n+'. Toca Editar canciones.';return}
+  if(q.some(function(c){return c.local}))desbloquearAudio();
   status.textContent='Conectando…';
-  var uris=q.map(function(c){return 'spotify:track:'+c.id});
-  if(!await sonar(uris))return;
-  activo=btn;btn.classList.add('playing');cola=uris;nombreAct=n;visto=false;intentos=0;
-  poll=setInterval(revisar,1500);
+  misa={n:n,segs:armarSegmentos(q),i:0,total:q.length,base:0,id:gen};
+  activo=btn;btn.classList.add('playing');
+  correrSegmento(misa);
 }
+async function correrSegmento(m){
+  if(m.id!==gen||misa!==m)return;
+  var prev=m.segs[m.i-1];
+  if(m.i>=m.segs.length){
+    if(prev&&!prev.loc)api('PUT','/me/player/pause');
+    return fin('Terminó: '+m.n);
+  }
+  var sg=m.segs[m.i],base=0;
+  for(var j=0;j<m.i;j++)base+=m.segs[j].items.length;
+  m.base=base;
+  if(sg.loc){
+    if(prev&&!prev.loc)api('PUT','/me/player/pause');
+    var c=sg.items[0],url=null;
+    try{var b=await dbGet(c.id);if(b){if(urlAct)URL.revokeObjectURL(urlAct);url=urlAct=URL.createObjectURL(b)}}catch(e){}
+    if(m.id!==gen)return;
+    if(!url){status.textContent='No se encontró el audio «'+c.t+'» en este dispositivo.';m.i++;setTimeout(function(){correrSegmento(m)},1500);return}
+    audio.onended=function(){m.i++;correrSegmento(m)};
+    audio.ontimeupdate=function(){if(audio.duration)prog.style.width=(audio.currentTime/audio.duration*100)+'%'};
+    audio.src=url;
+    try{await audio.play()}catch(e){status.textContent='No se pudo reproducir «'+c.t+'». Toca el botón otra vez.';detenerLocal();return}
+    status.textContent=(m.total>1?'Reproduciendo '+(base+1)+' de '+m.total+': ':'Reproduciendo: ')+c.t;
+  }else{
+    var uris=sg.items.map(function(x){return 'spotify:track:'+x.id});
+    if(!await sonar(uris)){if(m.id===gen)detenerLocal();return}
+    if(m.id!==gen)return;
+    cola=uris;visto=false;intentos=0;
+    clearInterval(poll);poll=setInterval(revisar,1500);
+  }
+}
+function avanzar(){var m=misa;clearInterval(poll);poll=null;cola=[];if(!m)return;m.i++;correrSegmento(m)}
 async function revisar(){
-  if(!cola.length)return;
+  if(!cola.length||!misa)return;
+  var m=misa,g=gen;
   var r=await api('GET','/me/player'),d=r.data;
+  if(g!==gen||!cola.length)return;
   intentos++;
   var k=(d&&d.item)?cola.indexOf(d.item.uri):-1;
   if(k<0){
-    if(visto)return fin('Terminó: '+nombreAct);
-    if(intentos>8)return fin('No se pudo reproducir. ¿Está abierta la app de Spotify?');
+    if(visto)return avanzar();
+    if(intentos>8)return fin('No se pudo reproducir. Toca el botón otra vez.');
     return;
   }
   visto=true;
-  if(!d.is_playing&&k===cola.length-1&&(d.progress_ms<1500||d.progress_ms>=d.item.duration_ms-1500))return fin('Terminó: '+nombreAct);
-  status.textContent=(cola.length>1?'Reproduciendo '+(k+1)+' de '+cola.length+': ':'Reproduciendo: ')+d.item.name+(d.is_playing?'':' (en pausa)');
+  if(!d.is_playing&&k===cola.length-1&&(d.progress_ms<1500||d.progress_ms>=d.item.duration_ms-1500))return avanzar();
+  status.textContent=(m.total>1?'Reproduciendo '+(m.base+k+1)+' de '+m.total+': ':'Reproduciendo: ')+d.item.name+(d.is_playing?'':' (en pausa)');
   prog.style.width=(d.progress_ms/d.item.duration_ms*100)+'%';
 }
 $('stop').addEventListener('click',async function(){detenerLocal();status.textContent='Detenido';await api('PUT','/me/player/pause')});
@@ -249,12 +307,12 @@ function pintarFilas(){
     q.forEach(function(c,k){
       var s=el('div','srow');
       s.appendChild(el('span','num',String(k+1)));
-      s.appendChild(el('span','t',c.t));
+      s.appendChild(el('span','t',(c.local?'📱 ':'')+c.t));
       function mover(d){var o=q[k+d];q[k+d]=q[k];q[k]=o;guardar();pintarFilas()}
       if(k>0){var u=el('button','mini','▲');u.setAttribute('aria-label','Subir');u.addEventListener('click',function(){mover(-1)});s.appendChild(u)}
       if(k<q.length-1){var d=el('button','mini','▼');d.setAttribute('aria-label','Bajar');d.addEventListener('click',function(){mover(1)});s.appendChild(d)}
       var x=el('button','mini q','✕');x.setAttribute('aria-label','Quitar');
-      x.addEventListener('click',function(){q.splice(k,1);if(!q.length)delete canciones[n];guardar();marcar();pintarFilas()});
+      x.addEventListener('click',function(){if(c.local)dbDel(c.id).catch(function(){});q.splice(k,1);if(!q.length)delete canciones[n];guardar();marcar();pintarFilas()});
       s.appendChild(x);blk.appendChild(s);
     });
     filas.appendChild(blk);
@@ -265,7 +323,7 @@ $('listo').addEventListener('click',function(){status.textContent='Canciones gua
 $('salir').addEventListener('click',cerrarSesion);
 
 /* ---------- Selector: buscar y playlists reales ---------- */
-var body=$('pickBody'),tB=$('tBuscar'),tL=$('tListas');
+var body=$('pickBody'),tB=$('tBuscar'),tL=$('tListas'),tC=$('tCel');
 function abrirPicker(n){actual=n;$('pickTitle').textContent='Agregar a: '+n;vista('vPick');pestana('buscar')}
 function asignar(c){(canciones[actual]=canciones[actual]||[]).push(c);guardar();marcar();pintarFilas();vista('vEdit')}
 function fila(c){
@@ -274,8 +332,9 @@ function fila(c){
 }
 function aCancion(t){return{id:t.id,t:t.name,a:(t.artists||[]).map(function(a){return a.name}).join(', ')}}
 function pestana(p){
-  tB.classList.toggle('on',p==='buscar');tL.classList.toggle('on',p==='listas');
+  tB.classList.toggle('on',p==='buscar');tL.classList.toggle('on',p==='listas');tC.classList.toggle('on',p==='cel');
   body.textContent='';
+  if(p==='cel')return verCel();
   if(p==='buscar'){
     var i=el('input','search');i.type='search';i.placeholder='Escribe el nombre de la canción';
     var res=el('div'),espera=null;
@@ -320,8 +379,30 @@ async function verLista(l){
   if(!it){body.appendChild(el('div','vacio','No se pudo abrir esta playlist. Prueba con Buscar.'));return}
   it.forEach(function(x){if(x&&x.track&&x.track.id&&x.track.type==='track')body.appendChild(fila(aCancion(x.track)))});
 }
+function verCel(){
+  body.appendChild(el('div','vacio','Elige un audio guardado en este celular. Se guarda solo en este dispositivo.'));
+  var f=el('input');f.type='file';f.accept='audio/*';f.multiple=true;f.style.display='none';
+  var b=el('button','stop','📱 Elegir audio');
+  b.style.background='var(--green)';b.style.color='#000';
+  var msg=el('div','vacio','');
+  b.addEventListener('click',function(){f.click()});
+  f.addEventListener('change',async function(){
+    var fs=Array.prototype.slice.call(f.files);if(!fs.length)return;
+    msg.textContent='Guardando…';
+    try{
+      for(var i=0;i<fs.length;i++){
+        var id='local:'+Date.now()+'-'+Math.random().toString(36).slice(2,8);
+        await dbPut(id,fs[i]);
+        (canciones[actual]=canciones[actual]||[]).push({id:id,t:fs[i].name.replace(/\.[^.]+$/,''),a:'Audio del celular',local:true});
+      }
+      guardar();marcar();pintarFilas();vista('vEdit');
+    }catch(e){guardar();marcar();msg.textContent='No se pudo guardar el audio (¿poco espacio?).'}
+  });
+  body.appendChild(b);body.appendChild(f);body.appendChild(msg);
+}
 tB.addEventListener('click',function(){pestana('buscar')});
 tL.addEventListener('click',function(){pestana('listas')});
+tC.addEventListener('click',function(){pestana('cel')});
 $('pickBack').addEventListener('click',function(){vista('vEdit')});
 
 /* ---------- Ayuda ---------- */
